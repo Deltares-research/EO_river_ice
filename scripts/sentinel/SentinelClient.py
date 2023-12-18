@@ -157,7 +157,10 @@ class SentinelClient:
             raise Exception(f"Error parsing product search response: {e}")
 
         logging.info(
-            f"Returned product IDS: {[product.id for product in sentinel_products]}"
+            f"Returned product IDs: {[product.id for product in sentinel_products]}"
+        )
+        logging.info(
+            f"Returned product names: {[product.name for product in sentinel_products]}"
         )
         if not sentinel_products:
             logging.info("No products found for given search criteria")
@@ -181,7 +184,7 @@ class SentinelClient:
                     + product_id
                     + ")/$value"
                 )
-                logging.info("Download file from: " + url)
+                logging.info("Downloading file from: " + url)
                 response = self.session.get(url, allow_redirects=False)
 
                 while response.status_code in (301, 302, 303, 307):
@@ -197,7 +200,7 @@ class SentinelClient:
                 with open(os.path.join(self.out_dir, product_name + ".zip"), "wb") as p:
                     p.write(file_content)
                 logging.info(
-                    "Written product file to: "
+                    "Wrote product file to: "
                     + os.path.join(self.out_dir, product_name + ".zip")
                 )
         except requests.exceptions.RequestException as e:

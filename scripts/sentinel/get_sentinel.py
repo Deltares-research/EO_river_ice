@@ -1,4 +1,3 @@
-# %%
 import argparse
 import glob
 import json
@@ -14,7 +13,6 @@ from shapely.geometry import shape
 from SentinelClient import SentinelClient
 
 
-# %%
 @dataclass
 class FewsConfig:
     fews_info_file: str
@@ -145,8 +143,6 @@ def main():
     sentinelclient = SentinelClient(config)
     sentinelclient.download_products(config)
 
-
-# %%
 
 if __name__ == "__main__":
     main()
