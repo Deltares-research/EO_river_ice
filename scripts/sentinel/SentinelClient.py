@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import List
 
@@ -174,13 +175,20 @@ class SentinelClient:
             product_names = [product.name for product in sentinel_products]
             if sentinel_products:
                 keycloak_token = self.get_keycloak(config)
+                keycloak_gen_time = time.time()
                 logging.debug("Token generated")
             for product_id, product_name in zip(product_ids, product_names):
+                if (time.time() - keycloak_gen_time) > 540:
+                    keycloak_token = self.get_keycloak(config)
+                    keycloak_gen_time = time.time()
+                    logging.debug(
+                        "Token regenerated because time limit (9 minutes) was exceeded"
+                    )
                 self.session.headers.update(
                     {"Authorization": f"Bearer {keycloak_token}"}
                 )
                 url = (
-                    f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products("
+                    f"https://zipper.dataspace.copernicus.eu/odata/v1/Products("
                     + product_id
                     + ")/$value"
                 )

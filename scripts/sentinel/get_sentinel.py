@@ -8,9 +8,8 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 
-from shapely.geometry import shape
-
 from SentinelClient import SentinelClient
+from shapely.geometry import shape
 
 
 @dataclass
