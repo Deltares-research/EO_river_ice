@@ -3,10 +3,47 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import wraps
 from typing import List
 
 import requests
 from requests.exceptions import ChunkedEncodingError
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+
+
+# Decorator function
+def retry_on_chunked_encoding_error(func):
+    @wraps(func)
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_fixed(10),
+        retry=retry_if_exception_type(ChunkedEncodingError),
+    )
+    def wrapper(self, config, *args, **kwargs):
+        attempt_number = (
+            wrapper.retry.statistics["attempt_number"]
+            if "attempt_number" in wrapper.retry.statistics
+            else 1
+        )
+        try:
+            return func(self, config, *args, **kwargs)
+        except ChunkedEncodingError as e:
+            if attempt_number == 3:
+                logging.info(
+                    f"Connection error in {func.__name__}. Attempt number {attempt_number}, max amount of retries reached. Error: {e}"
+                )
+            else:
+                logging.error(
+                    f"Connection error in {func.__name__}. Attempt number {attempt_number}, retrying in 10 seconds. Error: {e}"
+                )
+            raise
+        except Exception as e:
+            logging.error(
+                f"Unexpected error occurred in {func.__name__} at attempt {attempt_number}: {e}"
+            )
+            raise  # Re-raise the exception for non-retryable errors
+
+    return wrapper
 
 
 class SentinelClient:
@@ -18,6 +55,7 @@ class SentinelClient:
         self.out_dir = config.out_dir
         self.session = requests.Session()
 
+    @retry_on_chunked_encoding_error
     def get_keycloak(self, config):
         """Function for generating a key token for the Sentinel dataspace"""
         data = {
@@ -39,7 +77,6 @@ class SentinelClient:
             raise Exception(
                 f"Keycloak token creation failed, check your login credentials. Error: {e}"
             )
-
         try:
             return r.json()["access_token"]
         except (ValueError, KeyError) as e:
@@ -112,98 +149,72 @@ class SentinelClient:
             geo_footprint=item["GeoFootprint"],
         )
 
-    @retry
+    @retry_on_chunked_encoding_error
     def search_products(self, config):
         """Search the Copernicus dataspace for images according to the filters"""
-        max_retries = 3
-        for attempt in range(1, max_retries + 1):
-            try:
-                if config.download_type == "ingestion":
-                    acquisition_start = (
-                        datetime.strptime(config.start_time, "%Y-%m-%dT%H:%M:%SZ")
-                        - timedelta(days=30)
-                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    if config.mission == "SENTINEL-1":
-                        response = self.session.get(
-                            f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq '{config.mission}' "
-                            f"and contains(Name,'_{config.product_mode}_') "
-                            f"and contains(Name,'1SDV') "
-                            f"and OData.CSC.Intersects(area=geography'SRID=4326;{config.geometry.wkt}') and PublicationDate gt {config.start_time} "
-                            f"and PublicationDate lt {config.end_time} "
-                            f"and ContentDate/Start gt {acquisition_start} "
-                            f"and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' "
-                            f"and att/OData.CSC.StringAttribute/Value eq '{config.product_type}')&$top=100"
-                        )
-                    elif config.mission == "SENTINEL-2":
-                        response = self.session.get(
-                            f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq '{config.mission}' "
-                            f"and OData.CSC.Intersects(area=geography'SRID=4326;{config.geometry.wkt}') and PublicationDate gt {config.start_time} "
-                            f"and PublicationDate lt {config.end_time} "
-                            f"and ContentDate/Start gt {acquisition_start} "
-                            f"and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' "
-                            f"and att/OData.CSC.StringAttribute/Value eq '{config.product_type}')&$top=100"
-                        )
-                    else:
-                        logging.error(
-                            "Choose one of SENTINEL-1 or SENTINEL-2 for the mission"
-                        )
-                        raise ValueError(
-                            "Choose one of SENTINEL-1 or SENTINEL-2 for the mission"
-                        )
-                    response.raise_for_status()
-                elif config.download_type == "acquisition":
-                    if config.mission == "SENTINEL-1":
-                        response = self.session.get(
-                            f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq '{config.mission}' "
-                            f"and contains(Name,'_{config.product_mode}_') "
-                            f"and contains(Name,'1SDV') "
-                            f"and OData.CSC.Intersects(area=geography'SRID=4326;{config.geometry.wkt}') "
-                            f"and ContentDate/Start gt {config.start_time} "
-                            f"and ContentDate/Start lt {config.end_time} "
-                            f"and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' "
-                            f"and att/OData.CSC.StringAttribute/Value eq '{config.product_type}')&$top=100"
-                        )
-                    elif config.mission == "SENTINEL-2":
-                        response = self.session.get(
-                            f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq '{config.mission}' "
-                            f"and OData.CSC.Intersects(area=geography'SRID=4326;{config.geometry.wkt}') "
-                            f"and ContentDate/Start gt {config.start_time} "
-                            f"and ContentDate/Start lt {config.end_time} and "
-                            f"Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' "
-                            f"and att/OData.CSC.StringAttribute/Value eq '{config.product_type}')&$top=100"
-                        )
-                    else:
-                        logging.error(
-                            "Choose one of SENTINEL-1 or SENTINEL-2 for the mission"
-                        )
-                        raise ValueError(
-                            "Choose one of SENTINEL-1 or SENTINEL-2 for the mission"
-                        )
-                    response.raise_for_status()
-                else:
-                    logging.error(
-                        "Choose one of acquistion or ingestion for the download_type"
-                    )
-                    raise ValueError(
-                        "Choose one of acquisition or ingestion for the download_type"
-                    )
-                break
-            except ChunkedEncodingError as e:
-                if attempt == max_retries:  # If max retries reached, raise error
-                    logging.error(
-                        f"Connection error: Max amount of retries ({max_retries}) reached. Error: {e}"
-                    )
-                    raise Exception(
-                        f"Connection error: Max amount of retries ({max_retries}) reached. Error: {e}"
-                    )
-                else:
-                    logging.info(
-                        f"Connection error, Error: {e}, attempt number {attempt}, retrying"
-                    )
-                    continue
-            except requests.exceptions.RequestException as e:
-                logging.error(f"Product search failed. Error: {e}")
-                raise Exception(f"Product search failed. Error: {e}")
+        if config.download_type == "ingestion":
+            acquisition_start = (
+                datetime.strptime(config.start_time, "%Y-%m-%dT%H:%M:%SZ")
+                - timedelta(days=30)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if config.mission == "SENTINEL-1":
+                response = self.session.get(
+                    f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq '{config.mission}' "
+                    f"and contains(Name,'_{config.product_mode}_') "
+                    f"and contains(Name,'1SDV') "
+                    f"and OData.CSC.Intersects(area=geography'SRID=4326;{config.geometry.wkt}') and PublicationDate gt {config.start_time} "
+                    f"and PublicationDate lt {config.end_time} "
+                    f"and ContentDate/Start gt {acquisition_start} "
+                    f"and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' "
+                    f"and att/OData.CSC.StringAttribute/Value eq '{config.product_type}')&$top=100"
+                )
+            elif config.mission == "SENTINEL-2":
+                response = self.session.get(
+                    f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq '{config.mission}' "
+                    f"and OData.CSC.Intersects(area=geography'SRID=4326;{config.geometry.wkt}') and PublicationDate gt {config.start_time} "
+                    f"and PublicationDate lt {config.end_time} "
+                    f"and ContentDate/Start gt {acquisition_start} "
+                    f"and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' "
+                    f"and att/OData.CSC.StringAttribute/Value eq '{config.product_type}')&$top=100"
+                )
+            else:
+                logging.error("Choose one of SENTINEL-1 or SENTINEL-2 for the mission")
+                raise ValueError(
+                    "Choose one of SENTINEL-1 or SENTINEL-2 for the mission"
+                )
+            response.raise_for_status()
+        elif config.download_type == "acquisition":
+            if config.mission == "SENTINEL-1":
+                response = self.session.get(
+                    f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq '{config.mission}' "
+                    f"and contains(Name,'_{config.product_mode}_') "
+                    f"and contains(Name,'1SDV') "
+                    f"and OData.CSC.Intersects(area=geography'SRID=4326;{config.geometry.wkt}') "
+                    f"and ContentDate/Start gt {config.start_time} "
+                    f"and ContentDate/Start lt {config.end_time} "
+                    f"and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' "
+                    f"and att/OData.CSC.StringAttribute/Value eq '{config.product_type}')&$top=100"
+                )
+            elif config.mission == "SENTINEL-2":
+                response = self.session.get(
+                    f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq '{config.mission}' "
+                    f"and OData.CSC.Intersects(area=geography'SRID=4326;{config.geometry.wkt}') "
+                    f"and ContentDate/Start gt {config.start_time} "
+                    f"and ContentDate/Start lt {config.end_time} and "
+                    f"Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' "
+                    f"and att/OData.CSC.StringAttribute/Value eq '{config.product_type}')&$top=100"
+                )
+            else:
+                logging.error("Choose one of SENTINEL-1 or SENTINEL-2 for the mission")
+                raise ValueError(
+                    "Choose one of SENTINEL-1 or SENTINEL-2 for the mission"
+                )
+            response.raise_for_status()
+        else:
+            logging.error("Choose one of acquistion or ingestion for the download_type")
+            raise ValueError(
+                "Choose one of acquisition or ingestion for the download_type"
+            )
 
         try:
             sentinel_products = [
@@ -224,10 +235,46 @@ class SentinelClient:
             logging.info("No products found for given search criteria")
         return sentinel_products
 
-    def download_products(self, config):
+    @retry_on_chunked_encoding_error
+    def download_product(self, config, product_id, keycloak_token, keycloak_gen_time):
+        if (time.time() - keycloak_gen_time) > 540:
+            keycloak_token = self.get_keycloak(config)
+            keycloak_gen_time = time.time()
+            logging.debug(
+                "Token regenerated because time limit (9 minutes) was exceeded"
+            )
+        self.session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
+        url = (
+            f"https://zipper.dataspace.copernicus.eu/odata/v1/Products("
+            + product_id
+            + ")/$value"
+        )
+        logging.info("Downloading file from: " + url)
+
+        response = self.session.get(url, allow_redirects=False)
+        while response.status_code in (
+            301,
+            302,
+            303,
+            307,
+        ):  # URL is redirected
+            url = response.headers["Location"]
+            response = self.session.get(url, allow_redirects=False)
+        response.raise_for_status()
+        file_content = response.content
+
+        if not os.path.exists(self.out_dir):
+            os.makedirs(self.out_dir)
+
+        with open(os.path.join(self.out_dir, product_name + ".zip"), "wb") as p:
+            p.write(file_content)
+        logging.info(
+            "Wrote product file to: "
+            + os.path.join(self.out_dir, product_name + ".zip")
+        )
+
+    def search_and_download(self, config):
         """Download the images found"""
-        max_retries = 3
-        # try:
         sentinel_products = self.search_products(config)
         product_ids = [product.id for product in sentinel_products]
         product_names = [product.name for product in sentinel_products]
@@ -236,61 +283,4 @@ class SentinelClient:
             keycloak_gen_time = time.time()
             logging.debug("Token generated")
         for product_id, product_name in zip(product_ids, product_names):
-            if (time.time() - keycloak_gen_time) > 540:
-                keycloak_token = self.get_keycloak(config)
-                keycloak_gen_time = time.time()
-                logging.debug(
-                    "Token regenerated because time limit (9 minutes) was exceeded"
-                )
-            self.session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
-            url = (
-                f"https://zipper.dataspace.copernicus.eu/odata/v1/Products("
-                + product_id
-                + ")/$value"
-            )
-            logging.info("Downloading file from: " + url)
-            for attempt in range(1, max_retries + 1):
-                try:
-                    response = self.session.get(url, allow_redirects=False)
-                    while response.status_code in (
-                        301,
-                        302,
-                        303,
-                        307,
-                    ):  # URL is redirected
-                        url = response.headers["Location"]
-                        response = self.session.get(url, allow_redirects=False)
-                    break
-                except ChunkedEncodingError as e:
-                    if attempt == max_retries:  # If max retries reached, raise error
-                        logging.error(
-                            f"Connection error: Max amount of retries ({max_retries}) reached. Error: {e}"
-                        )
-                        raise Exception(
-                            f"Connection error: Max amount of retries ({max_retries}) reached. Error: {e}"
-                        )
-                    else:
-                        logging.info(
-                            f"Connection error, Error: {e}, attempt number {attempt}, retrying"
-                        )
-                        continue
-                except requests.exceptions.RequestException as e:
-                    logging.error(
-                        f"Un unexpected error occured during download. Error: {e}"
-                    )
-                    raise Exception(
-                        f"Un unexpected error occured during download. Error: {e}"
-                    )
-                time.sleep(10)
-            response.raise_for_status()
-            file_content = response.content
-
-            if not os.path.exists(self.out_dir):
-                os.makedirs(self.out_dir)
-
-            with open(os.path.join(self.out_dir, product_name + ".zip"), "wb") as p:
-                p.write(file_content)
-            logging.info(
-                "Wrote product file to: "
-                + os.path.join(self.out_dir, product_name + ".zip")
-            )
+            self.download_product(self, product_id, keycloak_token, keycloak_gen_time)

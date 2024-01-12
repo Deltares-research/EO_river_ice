@@ -141,7 +141,7 @@ def main():
     config = FewsConfig(args.runInfoFile)
 
     sentinelclient = SentinelClient(config)
-    sentinelclient.download_products(config)
+    sentinelclient.search_and_download(config)
 
 
 if __name__ == "__main__":
