@@ -236,7 +236,9 @@ class SentinelClient:
         return sentinel_products
 
     @retry_on_chunked_encoding_error
-    def download_product(self, config, product_id, keycloak_token, keycloak_gen_time):
+    def download_product(
+        self, config, product_id, product_name, keycloak_token, keycloak_gen_time
+    ):
         if (time.time() - keycloak_gen_time) > 540:
             keycloak_token = self.get_keycloak(config)
             keycloak_gen_time = time.time()
@@ -283,4 +285,6 @@ class SentinelClient:
             keycloak_gen_time = time.time()
             logging.debug("Token generated")
         for product_id, product_name in zip(product_ids, product_names):
-            self.download_product(self, product_id, keycloak_token, keycloak_gen_time)
+            self.download_product(
+                config, product_id, product_name, keycloak_token, keycloak_gen_time
+            )
